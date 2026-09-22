@@ -15,6 +15,8 @@ type Progress = {
   xp_for_next_level: number;
   current_streak: number;
   longest_streak: number;
+  last_solved_date: string | null;
+  server_timezone: string;
   shield_available: number;
   shield_cap: number;
   streak_calendar: CalendarDay[];
@@ -33,6 +35,19 @@ type Recommendations = {
   weak_topics: { topic: string; mastery_score: number }[];
   recommendations: Recommendation[];
 };
+
+const dateKey = (value: Date) => value.toISOString().slice(0, 10);
+
+function serverDate(timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const value = (name: string) => Number(parts.find((part) => part.type === name)?.value);
+  return new Date(Date.UTC(value('year'), value('month') - 1, value('day')));
+}
 
 export default function Dashboard() {
   const [progress, setProgress] = useState<Progress>();
@@ -73,15 +88,26 @@ export default function Dashboard() {
   }, []);
   const xp = progress?.xp ?? 0;
   const streak = progress?.current_streak ?? 0;
-  const week = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() - 6 + index);
-    const key = date.toISOString().slice(0, 10);
+  const timezone = progress?.server_timezone ?? 'Asia/Kolkata';
+  const today = serverDate(timezone);
+  const history = new Map(progress?.streak_calendar.map((item) => [item.date, item]));
+  const calendarStart = new Date(today);
+  // Five Monday-to-Sunday rows: the prior four weeks plus the current week.
+  calendarStart.setUTCDate(today.getUTCDate() - ((today.getUTCDay() + 6) % 7) - 28);
+  const calendar = Array.from({ length: 35 }, (_, index) => {
+    const date = new Date(calendarStart);
+    date.setUTCDate(calendarStart.getUTCDate() + index);
+    const key = dateKey(date);
     return {
-      label: date.toLocaleDateString(undefined, { weekday: 'narrow' }),
-      day: progress?.streak_calendar.find((item) => item.date === key),
+      key,
+      date,
+      label: date.toLocaleDateString(undefined, { weekday: 'narrow', timeZone: 'UTC' }),
+      day: history.get(key),
+      isToday: key === dateKey(today),
+      isFuture: date > today,
     };
   });
+  const week = calendar.filter((item) => !item.isFuture).slice(-7);
   const levelPercent = progress
     ? Math.round((progress.xp_in_level / progress.xp_for_next_level) * 100)
     : 0;
@@ -118,7 +144,7 @@ export default function Dashboard() {
                         ? item.day.is_shielded
                           ? 'shielded'
                           : 'done'
-                        : index === 6
+                        : item.isToday
                           ? 'today'
                           : ''
                     }
@@ -194,24 +220,55 @@ export default function Dashboard() {
                 </div>
               </article>
               <aside className="activity">
-                <h3>Streak calendar</h3>
-                <div className="activity-chart">
-                  {week.map((item, index) => (
-                    <span
-                      key={index}
-                      className={item.day ? (item.day.is_shielded ? 'shield' : 'active') : ''}
-                      style={{ height: item.day ? '72%' : '18%' }}
-                    />
+                <div className="streak-calendar-heading">
+                  <div>
+                    <h3>Streak calendar</h3>
+                    <span>Last 5 weeks · {timezone}</span>
+                  </div>
+                  <b>
+                    {streak} day{streak === 1 ? '' : 's'}
+                  </b>
+                </div>
+                <div className="streak-calendar-weekdays" aria-hidden="true">
+                  {['M', 'T', 'W', 'T', 'F', 'S', 'S'].map((day, index) => (
+                    <span key={`${day}-${index}`}>{day}</span>
                   ))}
                 </div>
-                <div className="chart-days">
-                  {week.map((item, index) => (
-                    <span key={index}>{item.label}</span>
-                  ))}
+                <div className="streak-calendar-grid" aria-label="Last five weeks of practice">
+                  {calendar.map((item) => {
+                    const state = item.day
+                      ? item.day.is_shielded
+                        ? 'shielded'
+                        : 'completed'
+                      : item.isFuture
+                        ? 'future'
+                        : item.isToday
+                          ? 'today'
+                          : 'missed';
+                    const description = item.day
+                      ? item.day.is_shielded
+                        ? 'Shield protected'
+                        : 'Challenge completed'
+                      : item.isFuture
+                        ? 'Upcoming date'
+                        : item.isToday
+                          ? 'Today'
+                          : 'No completion';
+                    return (
+                      <span
+                        className={`streak-calendar-day ${state}`}
+                        key={item.key}
+                        title={`${item.key}: ${description}`}
+                      >
+                        <time dateTime={item.key}>{item.date.getUTCDate()}</time>
+                        {item.day && <i aria-hidden="true">{item.day.is_shielded ? '◆' : '✓'}</i>}
+                      </span>
+                    );
+                  })}
                 </div>
                 <p>
-                  <b>{streak}</b> day{streak === 1 ? '' : 's'} of practice. ◆ means a shield
-                  protected a missed day.
+                  <b>✓</b> completed · <b>◆</b> shielded · gray dates were missed. A missed date
+                  resets the streak; shields are not consumed automatically.
                 </p>
               </aside>
             </section>

@@ -35,6 +35,7 @@ from app.db.base import Base
 
 class UserRole(enum.StrEnum):
     USER = "user"
+    MENTOR = "mentor"
     MODERATOR = "moderator"
     ADMIN = "admin"
     SUPER_ADMIN = "super_admin"
@@ -92,6 +93,28 @@ class NotificationDeliveryStatus(enum.StrEnum):
 class ProgrammingLanguage(enum.StrEnum):
     PYTHON = "python"
     JAVASCRIPT = "javascript"
+
+
+class CommunityChallengeStatus(enum.StrEnum):
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    ARCHIVED = "archived"
+
+
+class CommunityEnrollmentStatus(enum.StrEnum):
+    ACTIVE = "active"
+    COMPLETED = "completed"
+    FORGONE = "forgone"
+    EXPIRED = "expired"
+
+
+class CommunityTaskKind(enum.StrEnum):
+    PROBLEM = "problem"
+    VIDEO = "video"
+    ARTICLE = "article"
+    SUMMARY = "summary"
+    IMAGE = "image"
+    RESOURCE = "resource"
 
 
 class XPReason(enum.StrEnum):
@@ -179,6 +202,18 @@ class User(UUIDPrimaryKey, Timestamped, Base):
         back_populates="handled_by", foreign_keys="ModerationReport.handled_by_id"
     )
     admin_audit_logs: Mapped[list[AdminAuditLog]] = relationship(back_populates="actor")
+    community_challenges_created: Mapped[list[CommunityChallenge]] = relationship(
+        back_populates="created_by", foreign_keys="CommunityChallenge.created_by_id"
+    )
+    community_enrollments: Mapped[list[CommunityEnrollment]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    community_discussions: Mapped[list[CommunityDiscussion]] = relationship(
+        back_populates="author", cascade="all, delete-orphan"
+    )
+    community_discussion_replies: Mapped[list[CommunityDiscussionReply]] = relationship(
+        back_populates="author", cascade="all, delete-orphan"
+    )
 
 
 class NotificationPreference(UUIDPrimaryKey, Timestamped, Base):
@@ -334,6 +369,9 @@ class QuestionVersion(UUIDPrimaryKey, Base):
         back_populates="question_version"
     )
     submissions: Mapped[list[Submission]] = relationship(back_populates="question_version")
+    community_challenge_tasks: Mapped[list[CommunityChallengeTask]] = relationship(
+        back_populates="question_version"
+    )
 
 
 class TestCase(UUIDPrimaryKey, Base):
@@ -714,6 +752,211 @@ class UserBadge(UUIDPrimaryKey, Base):
     source_submission: Mapped[Submission | None] = relationship(back_populates="badges")
 
 
+class CommunityChallenge(UUIDPrimaryKey, Timestamped, Base):
+    """An admin-authored programme made of scheduled learning tasks.
+
+    Tasks use a one-based offset from a learner's join date.  That single
+    representation supports daily, weekends-only, alternating-day and custom
+    plans without making a learner's historical schedule mutable.
+    """
+
+    __tablename__ = "community_challenges"
+    __table_args__ = (
+        CheckConstraint("duration_days >= 1", name="ck_community_challenge_duration_positive"),
+        CheckConstraint(
+            "completion_deadline_days >= 1",
+            name="ck_community_challenge_deadline_positive",
+        ),
+        Index("ix_community_challenges_status_created", "status", "created_at"),
+    )
+
+    slug: Mapped[str] = mapped_column(String(160), unique=True, nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    summary: Mapped[str] = mapped_column(String(500), nullable=False)
+    description_markdown: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[CommunityChallengeStatus] = mapped_column(
+        database_enum(CommunityChallengeStatus, "community_challenge_status"),
+        nullable=False,
+        server_default=CommunityChallengeStatus.DRAFT.value,
+    )
+    duration_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    completion_deadline_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    thumbnail_url: Mapped[str | None] = mapped_column(String(500))
+    created_by_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    created_by: Mapped[User | None] = relationship(
+        back_populates="community_challenges_created", foreign_keys=[created_by_id]
+    )
+    tasks: Mapped[list[CommunityChallengeTask]] = relationship(
+        back_populates="challenge",
+        cascade="all, delete-orphan",
+        order_by="CommunityChallengeTask.position",
+    )
+    enrollments: Mapped[list[CommunityEnrollment]] = relationship(back_populates="challenge")
+
+
+class CommunityChallengeTask(UUIDPrimaryKey, Timestamped, Base):
+    """A problem or learning asset made available on one programme day."""
+
+    __tablename__ = "community_challenge_tasks"
+    __table_args__ = (
+        UniqueConstraint("challenge_id", "position", name="uq_community_challenge_task_position"),
+        CheckConstraint("position > 0", name="ck_community_task_position_positive"),
+        CheckConstraint("day_offset > 0", name="ck_community_task_day_offset_positive"),
+        Index("ix_community_tasks_challenge_day", "challenge_id", "day_offset"),
+    )
+
+    challenge_id: Mapped[UUID] = mapped_column(
+        ForeignKey("community_challenges.id", ondelete="CASCADE"), nullable=False
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Day one is the join date; multiple tasks can share a day.
+    day_offset: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[CommunityTaskKind] = mapped_column(
+        database_enum(CommunityTaskKind, "community_task_kind"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    instructions_markdown: Mapped[str | None] = mapped_column(Text)
+    question_version_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("question_versions.id", ondelete="RESTRICT")
+    )
+    video_url: Mapped[str | None] = mapped_column(String(500))
+    resource_url: Mapped[str | None] = mapped_column(String(500))
+    asset_urls: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    summary_markdown: Mapped[str | None] = mapped_column(Text)
+    is_required: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+
+    challenge: Mapped[CommunityChallenge] = relationship(back_populates="tasks")
+    question_version: Mapped[QuestionVersion | None] = relationship(
+        back_populates="community_challenge_tasks"
+    )
+    progress_records: Mapped[list[CommunityTaskProgress]] = relationship(back_populates="task")
+
+
+class CommunityEnrollment(UUIDPrimaryKey, Timestamped, Base):
+    """A user-owned immutable schedule snapshot for a joined programme."""
+
+    __tablename__ = "community_enrollments"
+    __table_args__ = (
+        UniqueConstraint("user_id", "challenge_id", name="uq_community_enrollment_user_challenge"),
+        # PostgreSQL, rather than UI state, guarantees one active programme per learner.
+        Index(
+            "uq_community_active_enrollment_user",
+            "user_id",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+        ),
+        Index("ix_community_enrollments_challenge_status", "challenge_id", "status"),
+    )
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    challenge_id: Mapped[UUID] = mapped_column(
+        ForeignKey("community_challenges.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[CommunityEnrollmentStatus] = mapped_column(
+        database_enum(CommunityEnrollmentStatus, "community_enrollment_status"),
+        nullable=False,
+        server_default=CommunityEnrollmentStatus.ACTIVE.value,
+    )
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    forgone_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    user: Mapped[User] = relationship(back_populates="community_enrollments")
+    challenge: Mapped[CommunityChallenge] = relationship(back_populates="enrollments")
+    task_progress: Mapped[list[CommunityTaskProgress]] = relationship(
+        back_populates="enrollment", cascade="all, delete-orphan"
+    )
+
+
+class CommunityTaskProgress(UUIDPrimaryKey, Base):
+    """Server-side completion evidence for an enrolled task."""
+
+    __tablename__ = "community_task_progress"
+    __table_args__ = (
+        UniqueConstraint("enrollment_id", "task_id", name="uq_community_task_progress"),
+        Index("ix_community_task_progress_enrollment", "enrollment_id"),
+    )
+
+    enrollment_id: Mapped[UUID] = mapped_column(
+        ForeignKey("community_enrollments.id", ondelete="CASCADE"), nullable=False
+    )
+    task_id: Mapped[UUID] = mapped_column(
+        ForeignKey("community_challenge_tasks.id", ondelete="RESTRICT"), nullable=False
+    )
+    completed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completion_note: Mapped[str | None] = mapped_column(Text)
+
+    enrollment: Mapped[CommunityEnrollment] = relationship(back_populates="task_progress")
+    task: Mapped[CommunityChallengeTask] = relationship(back_populates="progress_records")
+
+
+class CommunityDiscussion(UUIDPrimaryKey, Timestamped, Base):
+    """A question posted by the community; replies form its conversation tree."""
+
+    __tablename__ = "community_discussions"
+    __table_args__ = (
+        Index("ix_community_discussions_created", "created_at"),
+        Index("ix_community_discussions_author_created", "author_id", "created_at"),
+    )
+
+    author_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    tags: Mapped[list[str]] = mapped_column(JSONB, nullable=False, server_default="[]")
+    is_pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    is_locked: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+    author: Mapped[User] = relationship(back_populates="community_discussions")
+    replies: Mapped[list[CommunityDiscussionReply]] = relationship(
+        back_populates="discussion",
+        cascade="all, delete-orphan",
+        order_by="CommunityDiscussionReply.created_at",
+    )
+
+
+class CommunityDiscussionReply(UUIDPrimaryKey, Timestamped, Base):
+    """A threaded response. Mentor attribution is calculated from the author's role."""
+
+    __tablename__ = "community_discussion_replies"
+    __table_args__ = (
+        Index("ix_community_replies_discussion_created", "discussion_id", "created_at"),
+        Index("ix_community_replies_parent", "parent_reply_id"),
+    )
+
+    discussion_id: Mapped[UUID] = mapped_column(
+        ForeignKey("community_discussions.id", ondelete="CASCADE"), nullable=False
+    )
+    author_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    parent_reply_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("community_discussion_replies.id", ondelete="CASCADE")
+    )
+    body_markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    is_accepted_answer: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+
+    discussion: Mapped[CommunityDiscussion] = relationship(back_populates="replies")
+    author: Mapped[User] = relationship(back_populates="community_discussion_replies")
+    parent: Mapped[CommunityDiscussionReply | None] = relationship(
+        remote_side="CommunityDiscussionReply.id", back_populates="children"
+    )
+    children: Mapped[list[CommunityDiscussionReply]] = relationship(back_populates="parent")
+
+
 class Friendship(UUIDPrimaryKey, Timestamped, Base):
     """A canonical user pair: one pending/accepted row represents one relationship."""
 
@@ -763,9 +1006,7 @@ class ModerationReport(UUIDPrimaryKey, Base):
     details: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), nullable=False, server_default="open")
     resolution_note: Mapped[str | None] = mapped_column(Text)
-    handled_by_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL")
-    )
+    handled_by_id: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     handled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

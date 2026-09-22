@@ -10,6 +10,8 @@ from app.admin_operations.router import public_router as moderation_router
 from app.admin_operations.router import router as admin_operations_router
 from app.auth.router import admin_router
 from app.auth.router import router as auth_router
+from app.community.router import admin_router as community_admin_router
+from app.community.router import router as community_router
 from app.config import get_settings
 from app.leaderboards.router import leaderboard_router, social_router
 from app.learning.router import admin_router as learning_admin_router
@@ -29,6 +31,8 @@ app.add_middleware(
 )
 app.include_router(auth_router, prefix=settings.api_prefix)
 app.include_router(admin_router, prefix=settings.api_prefix)
+app.include_router(community_router, prefix=settings.api_prefix)
+app.include_router(community_admin_router, prefix=settings.api_prefix)
 app.include_router(admin_operations_router, prefix=settings.api_prefix)
 app.include_router(moderation_router, prefix=settings.api_prefix)
 app.include_router(learning_router, prefix=settings.api_prefix)

@@ -12,6 +12,7 @@ type Progress = { current_streak: number };
 const links = [
   { href: '/dashboard', label: 'Dashboard' },
   { href: '/challenge', label: 'Problems' },
+  { href: '/community', label: 'Community' },
   { href: '/submissions', label: 'Submissions' },
   { href: '/leaderboard', label: 'Leaderboard' },
   { href: '/settings', label: 'Profile' },

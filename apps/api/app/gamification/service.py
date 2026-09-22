@@ -192,7 +192,7 @@ def quit_daily_attempt(db: Session, user_id: UUID, assignment_id: UUID) -> Daily
 def _streak_for_completion(
     db: Session, user_id: UUID, submission_id: UUID | None = None
 ) -> Streak:
-    """Advance once per server day; consume at most one shield for a one-day miss."""
+    """Advance once per server day without silently protecting a missed day."""
     today = server_today()
     streak = db.scalar(select(Streak).where(Streak.user_id == user_id).with_for_update())
     if streak is None:
@@ -233,24 +233,10 @@ def _streak_for_completion(
             return streak
         if gap == 1:
             next_streak = streak.current_streak + 1
-        elif gap == 2 and shield.available > 0:
-            protected_day = today - timedelta(days=1)
-            shield.available -= 1
-            db.add(
-                StreakDay(user_id=user_id, solved_date=protected_day, is_shielded=True)
-            )
-            db.add(
-                StreakShieldTransaction(
-                    user_id=user_id,
-                    shield_id=shield.id,
-                    amount=-1,
-                    reason="missed_day_protection",
-                    event_key=f"shield-used:{user_id}:{protected_day.isoformat()}",
-                    metadata_json={"protected_date": protected_day.isoformat()},
-                )
-            )
-            next_streak = streak.current_streak + 2
         else:
+            # A shield must be deliberately used by a learner in a future
+            # shield flow. It is never consumed automatically merely because
+            # a submission arrives after a missed server date.
             next_streak = 1
 
     db.add(StreakDay(user_id=user_id, solved_date=today, submission_id=submission_id))
@@ -408,7 +394,7 @@ def reward_submission(db: Session, submission: Submission) -> list[UUID]:
     return notification_ids
 
 
-def progress_data(db: Session, user: User, calendar_days: int = 28) -> dict:
+def progress_data(db: Session, user: User, calendar_days: int = 35) -> dict:
     """Build a server-derived gamification read model for dashboard and profile."""
     ensure_badge_catalog(db)
     xp = (
@@ -423,6 +409,14 @@ def progress_data(db: Session, user: User, calendar_days: int = 28) -> dict:
     streak = db.scalar(select(Streak).where(Streak.user_id == user.id))
     shield = db.scalar(select(StreakShield).where(StreakShield.user_id == user.id))
     today = server_today()
+    active_streak = 0
+    if streak and streak.last_solved_date:
+        days_since_last_solve = (today - streak.last_solved_date).days
+        # A current streak remains alive through the day after the last
+        # completion. Once a full server day is missed, show zero immediately
+        # instead of showing a stale persisted number until the next solve.
+        if 0 <= days_since_last_solve <= 1:
+            active_streak = streak.current_streak
     start = today - timedelta(days=calendar_days - 1)
     days = list(
         db.scalars(
@@ -452,7 +446,7 @@ def progress_data(db: Session, user: User, calendar_days: int = 28) -> dict:
         "xp_level_name": level_name,
         "xp_in_level": xp_in_level,
         "xp_for_next_level": xp_for_next,
-        "current_streak": streak.current_streak if streak else 0,
+        "current_streak": active_streak,
         "longest_streak": streak.longest_streak if streak else 0,
         "last_solved_date": streak.last_solved_date if streak else None,
         "server_timezone": get_settings().streak_timezone,
